@@ -11,6 +11,7 @@ const int MQTT_SERVER_PORT_SIZE = 6;
 const int MQTT_CLIENT_ID_SIZE = 32;
 
 const int ANALOG_HUMIDITY_READ_FREQ = 30000; // millis
+const int RESET_BUTTON_PRESS_TIME = 5000; // millis
 
 const byte HUMIDITY_SENSOR_DIGITAL_PIN = 16;
 const byte HUMIDITY_SENSOR_DIGITAL_LED_PIN = 13;
@@ -18,6 +19,7 @@ const byte HUMIDITY_SENSOR_ANALOG_PIN = A0;
 const byte WATER_LEVEL_SENSOR_PIN = 5;
 const byte WATER_LEVEL_SENSOR_LED_PIN = 12;
 const byte MODE_PIN = 0;
+const byte CONFIG_RESET_PIN = 14;
 const byte PUMP_PIN = 4;
 
 const byte MODE_MANUAL = 0;
@@ -31,6 +33,8 @@ char mqtt_client_id[MQTT_CLIENT_ID_SIZE] = "esp8266";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+WiFiManager wifiManager;
 
 const byte TEST_LED_PIN = 2;
 
@@ -49,6 +53,9 @@ boolean pumpIsWorking = false;
 boolean lastPumpControlMessage = false;
 
 bool shouldSaveConfig = false;
+
+bool resetButtonPressed = false;
+long resetButtonPressTime = 0;
 
 unsigned long lastAnalogHumidityRead = 0;
 
@@ -151,6 +158,7 @@ void setup()
 
   pinMode(MODE_PIN, INPUT_PULLUP);
   pinMode(PUMP_PIN, OUTPUT);
+  pinMode(CONFIG_RESET_PIN, INPUT_PULLUP);
 }
 
 void setupConfigurationAndWiFi() {
@@ -205,7 +213,6 @@ void setupConfigurationAndWiFi() {
     MQTT_CLIENT_ID_SIZE
   );
 
-  WiFiManager wifiManager;
   wifiManager.setSaveConfigCallback(saveConfigCallback);
   //wifiManager.resetSettings();
   wifiManager.addParameter(&mqttServerIpParameter);
@@ -248,6 +255,22 @@ void handleInputs() {
     Serial.print("Mode changed to ");
     Serial.println(mode);
     publish(createTopicFromDeviceId("mode").c_str(), mode);
+  }
+  // --------------------------------
+  // CONFIG RESET
+  // --------------------------------
+  if (digitalRead(CONFIG_RESET_PIN) == LOW) {
+    if (!resetButtonPressed) {
+      resetButtonPressed = true;
+      resetButtonPressTime = millis();
+    }
+  } else {
+    if (resetButtonPressed && millis() - resetButtonPressTime >= RESET_BUTTON_PRESS_TIME) {
+      Serial.println("Clearing configuration");
+      wifiManager.resetSettings();
+      ESP.reset();
+    }
+    resetButtonPressed = false;
   }
   // --------------------------------
   // HUMIDITY (DIGITAL)
