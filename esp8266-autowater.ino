@@ -3,7 +3,11 @@
 #include <Wire.h>
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
-#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h> // https://github.com/tzapu/WiFiManager
+#include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
+
+const int MQTT_SERVER_IP_SIZE = 24;
+const int MQTT_SERVER_PORT_SIZE = 6;
 
 const int ANALOG_HUMIDITY_READ_FREQ = 30000; // millis
 
@@ -20,7 +24,8 @@ const byte MODE_AUTO = 1;
 const byte HUMIDITY_DRY = 1;
 const byte WATER_LEVEL_HAS_WATER = 0;
 
-const char *mqtt_server = "SERVER_IP";
+char mqtt_server_ip[MQTT_SERVER_IP_SIZE];
+char mqtt_server_port[MQTT_SERVER_PORT_SIZE];
 const char *device_id = "esp8266";
 
 WiFiClient espClient;
@@ -29,6 +34,8 @@ PubSubClient client(espClient);
 const byte TEST_LED_PIN = 2;
 
 char messageBuffer[128];
+
+const int configJsonCapacity = JSON_OBJECT_SIZE(2) + 60; // Based on https://arduinojson.org/v6/assistant/
 
 struct Humidity {
   int analog;
@@ -40,10 +47,16 @@ int mode = -1;
 boolean pumpIsWorking = false;
 boolean lastPumpControlMessage = false;
 
+bool shouldSaveConfig = false;
+
 unsigned long lastAnalogHumidityRead = 0;
 
 const String createTopicFromDeviceId(String topic) {
   return (String(device_id) + "/" + topic).c_str();
+}
+
+void saveConfigCallback () {
+  shouldSaveConfig = true;
 }
 
 void callback(char *topic, byte *payload, unsigned int length)
@@ -121,11 +134,9 @@ void setup()
 {
   Serial.begin(115200);
 
-  WiFiManager wifiManager;
-  //wifiManager.resetSettings();
-  wifiManager.autoConnect();
+  setupConfigurationAndWiFi();
 
-  client.setServer(mqtt_server, 1883);
+  client.setServer(mqtt_server_ip, String(mqtt_server_port).toInt());
   client.setCallback(callback);
 
   // LEDs
@@ -139,6 +150,80 @@ void setup()
 
   pinMode(MODE_PIN, INPUT_PULLUP);
   pinMode(PUMP_PIN, OUTPUT);
+}
+
+void setupConfigurationAndWiFi() {
+  // Read MQTT server IP and port from configuration JSON file
+  Serial.println("Mounting FS...");
+
+  //SPIFFS.format();
+  if (SPIFFS.begin()) {
+    Serial.println("FS mounted");
+    if (SPIFFS.exists("/config.json")) {
+      Serial.println("Reading config");
+      File configFile = SPIFFS.open("/config.json", "r");
+      if (configFile) {
+        DynamicJsonDocument doc(configJsonCapacity);
+        DeserializationError error = deserializeJson(doc, configFile);
+        if (error) {
+          Serial.print("Failed to load JSON config: ");
+          Serial.println(error.c_str());
+        } else {
+          serializeJson(doc, Serial);
+          Serial.println("");
+          strcpy(mqtt_server_ip, doc["mqttServerIp"]);
+          strcpy(mqtt_server_port, doc["mqttServerPort"]);
+        }
+        configFile.close();
+      }
+    } else {
+      Serial.println("No config");
+    }
+  } else {
+    Serial.println("failed to mount FS");
+  }
+
+  // Setup WiFiManager
+  WiFiManagerParameter mqttServerIpParameter(
+    "mqtt-ip",
+    "MQTT Server IP address",
+    mqtt_server_ip,
+    MQTT_SERVER_IP_SIZE
+  );
+  WiFiManagerParameter mqttServerPortParameter(
+    "mqtt-port",
+    "MQTT Server port",
+    mqtt_server_port,
+    MQTT_SERVER_PORT_SIZE
+  );
+
+  WiFiManager wifiManager;
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+  //wifiManager.resetSettings();
+  wifiManager.addParameter(&mqttServerIpParameter);
+  wifiManager.addParameter(&mqttServerPortParameter);
+  wifiManager.autoConnect();
+
+  // Update MQTT server IP and port
+  strcpy(mqtt_server_ip, mqttServerIpParameter.getValue());
+  strcpy(mqtt_server_port, mqttServerPortParameter.getValue());
+
+  // Save MQTT server IP and port to configuration JSON file
+  if (shouldSaveConfig) {
+    Serial.println("Saving config");
+    DynamicJsonDocument doc(configJsonCapacity);
+    doc["mqttServerIp"] = mqtt_server_ip;
+    doc["mqttServerPort"] = mqtt_server_port;
+
+    File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile) {
+      Serial.println("Failed to open config file for writing");
+    }
+    serializeJson(doc, Serial);
+    Serial.println("");
+    serializeJson(doc, configFile);
+    configFile.close();
+  }
 }
 
 void handleInputs() {
