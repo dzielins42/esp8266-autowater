@@ -1,7 +1,9 @@
-#include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
 #include <Wire.h>
+#include <DNSServer.h>
+#include <ESP8266WebServer.h>
+#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
 
 const int ANALOG_HUMIDITY_READ_FREQ = 30000; // millis
 
@@ -18,8 +20,6 @@ const byte MODE_AUTO = 1;
 const byte HUMIDITY_DRY = 1;
 const byte WATER_LEVEL_HAS_WATER = 0;
 
-const char *ssid = "SSID";
-const char *password = "PASSWORD";
 const char *mqtt_server = "SERVER_IP";
 const char *device_id = "esp8266";
 
@@ -121,15 +121,9 @@ void setup()
 {
   Serial.begin(115200);
 
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.println("Connecting to WiFi...");
-  }
-  Serial.print("Connected to ");
-  Serial.println(ssid);
+  WiFiManager wifiManager;
+  //wifiManager.resetSettings();
+  wifiManager.autoConnect();
 
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
@@ -142,6 +136,7 @@ void setup()
   pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
   pinMode(HUMIDITY_SENSOR_ANALOG_PIN, INPUT);
   pinMode(WATER_LEVEL_SENSOR_PIN, INPUT_PULLUP);
+
   pinMode(MODE_PIN, INPUT_PULLUP);
   pinMode(PUMP_PIN, OUTPUT);
 }
