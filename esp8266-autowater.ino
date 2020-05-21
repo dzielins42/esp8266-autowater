@@ -8,6 +8,7 @@
 
 const int MQTT_SERVER_IP_SIZE = 24;
 const int MQTT_SERVER_PORT_SIZE = 6;
+const int MQTT_CLIENT_ID_SIZE = 32;
 
 const int ANALOG_HUMIDITY_READ_FREQ = 30000; // millis
 
@@ -26,7 +27,7 @@ const byte WATER_LEVEL_HAS_WATER = 0;
 
 char mqtt_server_ip[MQTT_SERVER_IP_SIZE];
 char mqtt_server_port[MQTT_SERVER_PORT_SIZE];
-const char *device_id = "esp8266";
+char mqtt_client_id[MQTT_CLIENT_ID_SIZE] = "esp8266";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -35,7 +36,7 @@ const byte TEST_LED_PIN = 2;
 
 char messageBuffer[128];
 
-const int configJsonCapacity = JSON_OBJECT_SIZE(2) + 60; // Based on https://arduinojson.org/v6/assistant/
+const int configJsonCapacity = JSON_OBJECT_SIZE(3) + 100; // Based on https://arduinojson.org/v6/assistant/
 
 struct Humidity {
   int analog;
@@ -52,7 +53,7 @@ bool shouldSaveConfig = false;
 unsigned long lastAnalogHumidityRead = 0;
 
 const String createTopicFromDeviceId(String topic) {
-  return (String(device_id) + "/" + topic).c_str();
+  return (String(mqtt_client_id) + "/" + topic).c_str();
 }
 
 void saveConfigCallback () {
@@ -114,7 +115,7 @@ void reconnect()
   while (!client.connected())
   {
     Serial.print("Attempting MQTT connection...");
-    if (client.connect(device_id))
+    if (client.connect(mqtt_client_id))
     {
       Serial.println("connected");
       subscribe(createTopicFromDeviceId("led_control"));
@@ -173,6 +174,7 @@ void setupConfigurationAndWiFi() {
           Serial.println("");
           strcpy(mqtt_server_ip, doc["mqttServerIp"]);
           strcpy(mqtt_server_port, doc["mqttServerPort"]);
+          strcpy(mqtt_client_id, doc["mqttClientId"]);
         }
         configFile.close();
       }
@@ -185,16 +187,22 @@ void setupConfigurationAndWiFi() {
 
   // Setup WiFiManager
   WiFiManagerParameter mqttServerIpParameter(
-    "mqtt-ip",
+    "mqtt-server-ip",
     "MQTT Server IP address",
     mqtt_server_ip,
     MQTT_SERVER_IP_SIZE
   );
   WiFiManagerParameter mqttServerPortParameter(
-    "mqtt-port",
+    "mqtt-server-port",
     "MQTT Server port",
     mqtt_server_port,
     MQTT_SERVER_PORT_SIZE
+  );
+  WiFiManagerParameter mqttClientIdParameter(
+    "mqtt-client-id",
+    "MQTT Client ID",
+    mqtt_client_id,
+    MQTT_CLIENT_ID_SIZE
   );
 
   WiFiManager wifiManager;
@@ -202,18 +210,21 @@ void setupConfigurationAndWiFi() {
   //wifiManager.resetSettings();
   wifiManager.addParameter(&mqttServerIpParameter);
   wifiManager.addParameter(&mqttServerPortParameter);
+  wifiManager.addParameter(&mqttClientIdParameter);
   wifiManager.autoConnect();
 
-  // Update MQTT server IP and port
+  // Update MQTT server IP and port, and client ID
   strcpy(mqtt_server_ip, mqttServerIpParameter.getValue());
   strcpy(mqtt_server_port, mqttServerPortParameter.getValue());
+  strcpy(mqtt_client_id, mqttClientIdParameter.getValue());
 
-  // Save MQTT server IP and port to configuration JSON file
+  // Save config
   if (shouldSaveConfig) {
     Serial.println("Saving config");
     DynamicJsonDocument doc(configJsonCapacity);
     doc["mqttServerIp"] = mqtt_server_ip;
     doc["mqttServerPort"] = mqtt_server_port;
+    doc["mqttClientId"] = mqtt_client_id;
 
     File configFile = SPIFFS.open("/config.json", "w");
     if (!configFile) {
