@@ -11,6 +11,7 @@ const int MQTT_SERVER_PORT_SIZE = 6;
 const int MQTT_CLIENT_ID_SIZE = 32;
 
 const int ANALOG_HUMIDITY_READ_FREQ = 30000; // millis
+const int MQTT_CONNECTION_ATTEMPT_FREQ = 5000; // millis
 const int RESET_BUTTON_PRESS_TIME = 5000; // millis
 
 const byte HUMIDITY_SENSOR_DIGITAL_PIN = 16;
@@ -58,16 +59,154 @@ bool resetButtonPressed = false;
 long resetButtonPressTime = 0;
 
 unsigned long lastAnalogHumidityRead = 0;
+unsigned long lastMqttConnectionAttempt = 0;
 
-const String createTopicFromDeviceId(String topic) {
-  return (String(mqtt_client_id) + "/" + topic).c_str();
+// --------------------------------
+// SETUP
+// --------------------------------
+void setup() {
+  Serial.begin(115200);
+
+  setupConfigurationAndWiFi();
+
+  client.setServer(mqtt_server_ip, String(mqtt_server_port).toInt());
+  client.setCallback(mqttCallback);
+
+  // LEDs
+  pinMode(TEST_LED_PIN, OUTPUT);
+  pinMode(WATER_LEVEL_SENSOR_LED_PIN, OUTPUT);
+  pinMode(HUMIDITY_SENSOR_DIGITAL_LED_PIN, OUTPUT);
+
+  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
+  pinMode(HUMIDITY_SENSOR_ANALOG_PIN, INPUT);
+  pinMode(WATER_LEVEL_SENSOR_PIN, INPUT_PULLUP);
+
+  pinMode(MODE_PIN, INPUT_PULLUP);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(CONFIG_RESET_PIN, INPUT_PULLUP);
 }
 
+// --------------------------------
+// LOOP
+// --------------------------------
+void loop() {
+  mqttReconnect();
+  client.loop();
+
+  handleInputs();
+  pumpLoop();
+}
+
+// --------------------------------
+// MQTT HELPER METHODS
+// --------------------------------
+boolean publish(String topic, const char* payload) {
+  return client.publish(topic.c_str(), payload);
+}
+
+boolean publish(String topic, const int value) {
+  char payload[8];
+  itoa(value, payload, 10);
+  return publish(topic, payload);
+}
+
+boolean subscribe(String topic) {
+  return client.subscribe(topic.c_str());
+}
+
+// --------------------------------
+// LOOP METHODS
+// --------------------------------
+void pumpLoop() {
+  boolean shouldWorkAuto = humidity.digital == HUMIDITY_DRY && waterLevel == WATER_LEVEL_HAS_WATER;
+  boolean shouldWorkManual = lastPumpControlMessage;
+
+  setPump((mode == MODE_AUTO && shouldWorkAuto) || (mode == MODE_MANUAL && shouldWorkManual));
+}
+
+void handleInputs() {
+  unsigned long time = millis();
+  // --------------------------------
+  // MODE
+  // --------------------------------
+  int newMode = digitalRead(MODE_PIN);
+  if (mode != newMode) {
+    mode = newMode;
+    Serial.print("Mode changed to ");
+    Serial.println(mode);
+    publish(createTopicFromDeviceId("mode").c_str(), mode);
+  }
+  // --------------------------------
+  // CONFIG RESET
+  // --------------------------------
+  if (digitalRead(CONFIG_RESET_PIN) == LOW) {
+    if (!resetButtonPressed) {
+      resetButtonPressed = true;
+      resetButtonPressTime = millis();
+    }
+  } else {
+    if (resetButtonPressed && millis() - resetButtonPressTime >= RESET_BUTTON_PRESS_TIME) {
+      Serial.println("Clearing configuration");
+      wifiManager.resetSettings();
+      ESP.reset();
+    }
+    resetButtonPressed = false;
+  }
+  // --------------------------------
+  // HUMIDITY (DIGITAL)
+  // --------------------------------
+  int newHumidityDigital = digitalRead(HUMIDITY_SENSOR_DIGITAL_PIN);
+  if (humidity.digital != newHumidityDigital) {
+    humidity.digital = newHumidityDigital;
+    Serial.print("Humidity changed to ");
+    Serial.print(humidity.digital);
+    Serial.println(" (digital)");
+    publish(createTopicFromDeviceId("humidity/digital").c_str(), humidity.digital);
+    if (humidity.digital == HUMIDITY_DRY) {
+      digitalWrite(HUMIDITY_SENSOR_DIGITAL_LED_PIN, HIGH);
+    } else {
+      digitalWrite(HUMIDITY_SENSOR_DIGITAL_LED_PIN, LOW);
+    }
+  }
+  // --------------------------------
+  // HUMIDITY (ANALOG)
+  // --------------------------------
+  /*if (abs(time - lastAnalogHumidityRead) >= ANALOG_HUMIDITY_READ_FREQ) {
+    lastAnalogHumidityRead = time;
+    int newHumidityAnalog = analogRead(HUMIDITY_SENSOR_ANALOG_PIN);
+    humidity.analog = newHumidityAnalog;
+    Serial.print("Humidity changed to ");
+    Serial.print(humidity.analog);
+    Serial.println(" (analog)");
+    char humidityAnalogPayload[8];
+    itoa(humidity.analog, humidityAnalogPayload, 10);
+    publish(createTopicFromDeviceId("humidity/analog"), humidityAnalogPayload);
+    }*/
+  // --------------------------------
+  // WATER LEVEL
+  // --------------------------------
+  int newWaterLevel = digitalRead(WATER_LEVEL_SENSOR_PIN);
+  if (waterLevel != newWaterLevel) {
+    waterLevel = newWaterLevel;
+    Serial.print("Water level changed to ");
+    Serial.println(waterLevel);
+    publish(createTopicFromDeviceId("water_level").c_str(), waterLevel);
+    if (waterLevel != WATER_LEVEL_HAS_WATER) {
+      digitalWrite(WATER_LEVEL_SENSOR_LED_PIN, HIGH);
+    } else {
+      digitalWrite(WATER_LEVEL_SENSOR_LED_PIN, LOW);
+    }
+  }
+}
+
+// --------------------------------
+// CALLBACKS
+// --------------------------------
 void saveConfigCallback () {
   shouldSaveConfig = true;
 }
 
-void callback(char *topic, byte *payload, unsigned int length)
+void  mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   int q;
   for (q = 0; q < length; q++) {
@@ -104,63 +243,9 @@ void callback(char *topic, byte *payload, unsigned int length)
   }
 }
 
-void setPump(boolean isOn) {
-  if (isOn != pumpIsWorking) {
-    if (isOn) {
-      digitalWrite(PUMP_PIN, HIGH);
-      publish(createTopicFromDeviceId("pump/state").c_str(), "1");
-    } else {
-      digitalWrite(PUMP_PIN, LOW);
-      publish(createTopicFromDeviceId("pump/state").c_str(), "0");
-    }
-    pumpIsWorking = isOn;
-  }
-}
-
-void reconnect()
-{
-  while (!client.connected())
-  {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect(mqtt_client_id))
-    {
-      Serial.println("connected");
-      subscribe(createTopicFromDeviceId("led_control"));
-      subscribe(createTopicFromDeviceId("pump/control"));
-    }
-    else
-    {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      delay(5000);
-    }
-  }
-}
-
-void setup()
-{
-  Serial.begin(115200);
-
-  setupConfigurationAndWiFi();
-
-  client.setServer(mqtt_server_ip, String(mqtt_server_port).toInt());
-  client.setCallback(callback);
-
-  // LEDs
-  pinMode(TEST_LED_PIN, OUTPUT);
-  pinMode(WATER_LEVEL_SENSOR_LED_PIN, OUTPUT);
-  pinMode(HUMIDITY_SENSOR_DIGITAL_LED_PIN, OUTPUT);
-
-  pinMode(HUMIDITY_SENSOR_DIGITAL_PIN, INPUT);
-  pinMode(HUMIDITY_SENSOR_ANALOG_PIN, INPUT);
-  pinMode(WATER_LEVEL_SENSOR_PIN, INPUT_PULLUP);
-
-  pinMode(MODE_PIN, INPUT_PULLUP);
-  pinMode(PUMP_PIN, OUTPUT);
-  pinMode(CONFIG_RESET_PIN, INPUT_PULLUP);
-}
-
+// --------------------------------
+// SETUP METHODS
+// --------------------------------
 void setupConfigurationAndWiFi() {
   // Read MQTT server IP and port from configuration JSON file
   Serial.println("Mounting FS...");
@@ -244,109 +329,40 @@ void setupConfigurationAndWiFi() {
   }
 }
 
-void handleInputs() {
-  unsigned long time = millis();
-  // --------------------------------
-  // MODE
-  // --------------------------------
-  int newMode = digitalRead(MODE_PIN);
-  if (mode != newMode) {
-    mode = newMode;
-    Serial.print("Mode changed to ");
-    Serial.println(mode);
-    publish(createTopicFromDeviceId("mode").c_str(), mode);
-  }
-  // --------------------------------
-  // CONFIG RESET
-  // --------------------------------
-  if (digitalRead(CONFIG_RESET_PIN) == LOW) {
-    if (!resetButtonPressed) {
-      resetButtonPressed = true;
-      resetButtonPressTime = millis();
-    }
-  } else {
-    if (resetButtonPressed && millis() - resetButtonPressTime >= RESET_BUTTON_PRESS_TIME) {
-      Serial.println("Clearing configuration");
-      wifiManager.resetSettings();
-      ESP.reset();
-    }
-    resetButtonPressed = false;
-  }
-  // --------------------------------
-  // HUMIDITY (DIGITAL)
-  // --------------------------------
-  int newHumidityDigital = digitalRead(HUMIDITY_SENSOR_DIGITAL_PIN);
-  if (humidity.digital != newHumidityDigital) {
-    humidity.digital = newHumidityDigital;
-    Serial.print("Humidity changed to ");
-    Serial.print(humidity.digital);
-    Serial.println(" (digital)");
-    publish(createTopicFromDeviceId("humidity/digital").c_str(), humidity.digital);
-    if (humidity.digital == HUMIDITY_DRY) {
-      digitalWrite(HUMIDITY_SENSOR_DIGITAL_LED_PIN, HIGH);
+void mqttReconnect() {
+if (!client.connected() && millis() - lastMqttConnectionAttempt >= MQTT_CONNECTION_ATTEMPT_FREQ) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect(mqtt_client_id)) {
+      Serial.println("Connected");
+      subscribe(createTopicFromDeviceId("led_control"));
+      subscribe(createTopicFromDeviceId("pump/control"));
     } else {
-      digitalWrite(HUMIDITY_SENSOR_DIGITAL_LED_PIN, LOW);
+      Serial.print("Failed, rc=");
+      Serial.println(client.state());
+      Serial.print("Next attempt in ");
+      Serial.print(MQTT_CONNECTION_ATTEMPT_FREQ);
+      Serial.println("ms");
     }
+    lastMqttConnectionAttempt = millis();
   }
-  // --------------------------------
-  // HUMIDITY (ANALOG)
-  // --------------------------------
-  /*if (abs(time - lastAnalogHumidityRead) >= ANALOG_HUMIDITY_READ_FREQ) {
-    lastAnalogHumidityRead = time;
-    int newHumidityAnalog = analogRead(HUMIDITY_SENSOR_ANALOG_PIN);
-    humidity.analog = newHumidityAnalog;
-    Serial.print("Humidity changed to ");
-    Serial.print(humidity.analog);
-    Serial.println(" (analog)");
-    char humidityAnalogPayload[8];
-    itoa(humidity.analog, humidityAnalogPayload, 10);
-    publish(createTopicFromDeviceId("humidity/analog"), humidityAnalogPayload);
-    }*/
-  // --------------------------------
-  // WATER LEVEL
-  // --------------------------------
-  int newWaterLevel = digitalRead(WATER_LEVEL_SENSOR_PIN);
-  if (waterLevel != newWaterLevel) {
-    waterLevel = newWaterLevel;
-    Serial.print("Water level changed to ");
-    Serial.println(waterLevel);
-    publish(createTopicFromDeviceId("water_level").c_str(), waterLevel);
-    if (waterLevel != WATER_LEVEL_HAS_WATER) {
-      digitalWrite(WATER_LEVEL_SENSOR_LED_PIN, HIGH);
+}
+
+// --------------------------------
+// OTHER
+// --------------------------------
+const String createTopicFromDeviceId(String topic) {
+  return (String(mqtt_client_id) + "/" + topic).c_str();
+}
+
+void setPump(boolean isOn) {
+  if (isOn != pumpIsWorking) {
+    if (isOn) {
+      digitalWrite(PUMP_PIN, HIGH);
+      publish(createTopicFromDeviceId("pump/state").c_str(), "1");
     } else {
-      digitalWrite(WATER_LEVEL_SENSOR_LED_PIN, LOW);
+      digitalWrite(PUMP_PIN, LOW);
+      publish(createTopicFromDeviceId("pump/state").c_str(), "0");
     }
+    pumpIsWorking = isOn;
   }
-}
-
-boolean publish(String topic, const char* payload) {
-  return client.publish(topic.c_str(), payload);
-}
-
-boolean publish(String topic, const int value) {
-  char payload[8];
-  itoa(value, payload, 10);
-  return publish(topic, payload);
-}
-
-boolean subscribe(String topic) {
-  return client.subscribe(topic.c_str());
-}
-
-void pumpLoop() {
-  boolean shouldWorkAuto = humidity.digital == HUMIDITY_DRY && waterLevel == WATER_LEVEL_HAS_WATER;
-  boolean shouldWorkManual = lastPumpControlMessage;
-
-  setPump((mode == MODE_AUTO && shouldWorkAuto) || (mode == MODE_MANUAL && shouldWorkManual));
-}
-
-void loop() {
-  if (!client.connected())
-  {
-    reconnect();
-  }
-  client.loop();
-
-  handleInputs();
-  pumpLoop();
 }
