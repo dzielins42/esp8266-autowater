@@ -330,7 +330,10 @@ void setupConfigurationAndWiFi() {
 }
 
 void mqttReconnect() {
-if (!client.connected() && millis() - lastMqttConnectionAttempt >= MQTT_CONNECTION_ATTEMPT_FREQ) {
+  boolean attemptConnection = !client.connected()
+                              && !(strlen(mqtt_server_ip) == 0 || strlen(mqtt_server_port) == 0)
+                              && millis() - lastMqttConnectionAttempt >= MQTT_CONNECTION_ATTEMPT_FREQ;
+  if (attemptConnection) {
     Serial.print("Attempting MQTT connection...");
     if (client.connect(mqtt_client_id)) {
       Serial.println("Connected");
